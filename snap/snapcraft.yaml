@@ -66,6 +66,7 @@ apps:
       - dbus-freedesktop-reservedevice1-audio8
       - dbus-freedesktop-reservedevice1-audio9
     plugs: &pwplugs
+      - desktop
       - alsa
       - bluez
       - camera
