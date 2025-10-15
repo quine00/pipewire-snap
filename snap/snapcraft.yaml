@@ -53,6 +53,7 @@ apps:
       - audio-playback
       - audio-record
       - pulseaudio
+      - dbus-pipewire-telephony
       - dbus-wireplumber
       - dbus-pulseaudio
       - dbus-freedesktop-reservedevice1-audio0
@@ -126,6 +127,10 @@ apps:
     environment: *serverenviron
 
 slots:
+  dbus-pipewire-telephony:
+    interface: dbus
+    name: org.pipewire.Telephony
+    bus: session
   dbus-wireplumber:
     interface: dbus
     name: org.freedesktop.ReserveDevice1
