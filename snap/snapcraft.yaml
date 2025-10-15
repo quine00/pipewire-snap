@@ -75,7 +75,7 @@ apps:
       - network
       - network-bind
       - system-observe
-
+      - modem-manager
   pipewire-pulse:
     command: usr/bin/pipewire-pulse
     daemon: simple
