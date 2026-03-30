@@ -258,6 +258,7 @@ parts:
       echo $git_ver
       craftctl set version="${git_ver}"
       patch -p1 < $CRAFT_PROJECT_DIR/patches/launch-wireplumber.diff
+      patch -p1 < $CRAFT_PROJECT_DIR/patches/0001-snap-policy-use-snapctl-for-all-audio-permission-che.patch
     build-packages:
       - dpkg-dev
       - debhelper-compat

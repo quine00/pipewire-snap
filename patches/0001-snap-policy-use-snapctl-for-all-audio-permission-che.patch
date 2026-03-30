@@ -1,0 +1,103 @@
+From 0147f6ea6f4526f98b6da2a1c0a4911bea4a6bea Mon Sep 17 00:00:00 2001
+From: Charles <charles05@canonical.com>
+Date: Wed, 27 May 2026 10:42:27 +0100
+Subject: [PATCH] snap-policy: use snapctl for all audio permission checks when
+ snap-confined
+
+The previous approach fell through to
+snapd_client_get_connections2_sync when the pulseaudio and
+audio-record snapctl checks both returned "not connected", but the
+/v2/connections endpoint uses openAccess which explicitly rejects
+requests arriving over snapd-snap.socket, so the call always failed
+and returned PW_SANDBOX_ACCESS_NONE, denying all audio access
+(including playback) to snaps connected to the system audio slots.
+
+The root cause is an architecture mismatch on standard Ubuntu: audio
+clients connect to core:audio-record and core:audio-playback rather
+than pipewire's own slots. snapd's is-connected command now provides
+an explicit --check-system-slot option for snaps exposing a pipewire
+or pulseaudio slot, allowing audio-record and audio-playback checks
+to also match the equivalent core/snapd slot. This lets the pipewire
+snap perform its snap-confined audio permission checks entirely via
+snapctl, without needing access to the full snapd socket.
+
+Replace the get_connections2_sync fallthrough with a third snapctl
+check for audio-playback (granting playback-only access), and return
+PW_SANDBOX_ACCESS_NONE if none of the three checks match. The
+get_connections2_sync path is still used unchanged when pipewire runs
+unconfined, where it has access to /run/snapd.socket.
+---
+ .../module-protocol-pulse/snap-policy.c       | 35 +++++++++++++++----
+ 1 file changed, 29 insertions(+), 6 deletions(-)
+
+diff --git a/src/modules/module-protocol-pulse/snap-policy.c b/src/modules/module-protocol-pulse/snap-policy.c
+index 774763f9a..83aade05c 100644
+--- a/src/modules/module-protocol-pulse/snap-policy.c
++++ b/src/modules/module-protocol-pulse/snap-policy.c
+@@ -111,7 +111,9 @@ pw_sandbox_access_t pw_snap_get_audio_permissions(struct client *client, int fd,
+ 		return PW_SANDBOX_ACCESS_NONE; // failed to get access to apparmor
+ 	}
+ 
+-	// If pipewire-pulse is inside a snap, use snapctl API
++	// If pipewire-pulse is inside a snap, use snapctl API to check
++	// connections to our own slots and, for audio slots, the equivalent
++	// system (core/snapd) slots via --check-system-slot.
+ 	if (g_str_has_prefix(aacon, SNAP_LABEL_PREFIX)) {
+ 		// If the snap wanting to get access is the same that contains pipewire,
+ 		// give to it full access.
+@@ -124,26 +126,47 @@ pw_sandbox_access_t pw_snap_get_audio_permissions(struct client *client, int fd,
+ 		if (!context)
+ 			context = "";
+ 
++		// Check if the connecting snap is connected to our pulseaudio slot.
+ 		char *snapctl_command[] = { "is-connected", "--apparmor-label", aa_label, "pulseaudio", NULL };
+ 		if (!snapd_client_run_snapctl2_sync(snapdclient, context, (char **) snapctl_command, NULL, NULL, &exit_code, NULL, &error)) {
+ 			pw_log_warn("snap_get_audio_permissions: error summoning snapctl2 for pulseaudio interface: %s", error->message);
+ 			return PW_SANDBOX_ACCESS_NONE;
+ 		}
+ 		if (exit_code != 1) {
+-			// 0  = Connected
++			// 0  = Connected to our slot
+ 			// 10 = Classic environment
+ 			// 11 = Not a snap
+ 			return PW_SANDBOX_ACCESS_ALL;
+ 		}
+-		char *snapctl_command2[] = { "is-connected", "--apparmor-label", aa_label, "audio-record", NULL };
++
++		// Check if the connecting snap is connected to our audio-record slot.
++		char *snapctl_command2[] = { "is-connected", "--apparmor-label", aa_label, "--check-system-slot", "audio-record", NULL };
+ 		if (!snapd_client_run_snapctl2_sync(snapdclient, context, (char **) snapctl_command2, NULL, NULL, &exit_code, NULL, &error)) {
+ 			pw_log_warn("snap_get_audio_permissions: error summoning snapctl2 for audio-record interface: %s", error->message);
+ 			return PW_SANDBOX_ACCESS_NONE;
+ 		}
+-		if (exit_code == 1) {
+-			return PW_SANDBOX_ACCESS_PLAYBACK;
++
++		if (exit_code != 1) {
++			// Connected to our audio-record slot or, via
++			// --check-system-slot, to core/snapd:audio-record: full access.
++			return PW_SANDBOX_ACCESS_ALL;
+ 		}
+-		return PW_SANDBOX_ACCESS_ALL;
++
++		// Check if the connecting snap is connected to our audio-playback slot.
++		char *snapctl_command3[] = { "is-connected", "--apparmor-label", aa_label, "--check-system-slot", "audio-playback", NULL };
++		if (!snapd_client_run_snapctl2_sync(snapdclient, context, (char **) snapctl_command3, NULL, NULL, &exit_code, NULL, &error)) {
++			pw_log_warn("snap_get_audio_permissions: error summoning snapctl2 for audio-playback interface: %s", error->message);
++			return PW_SANDBOX_ACCESS_NONE;
++		}
++		if (exit_code != 1) {
++			// Connected to our audio-playback slot or, via
++			// --check-system-slot, to core/snapd:audio-playback:
++			// playback only, no record access.
++			return PW_SANDBOX_ACCESS_PLAYBACK;
++ 		}
++
++		// Not connected to any audio interface on our snap or the system.
++		return PW_SANDBOX_ACCESS_NONE;
+ 	}
+ 
+ 	retv = snapd_client_get_connections2_sync(snapdclient,
+-- 
+2.53.0
+
