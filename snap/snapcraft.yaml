@@ -13,6 +13,12 @@ layout:
     bind: $SNAP/usr/share/pipewire
   /usr/share/wireplumber:
     bind: $SNAP/usr/share/wireplumber
+  /usr/share/spa-0.2:
+    bind: $SNAP/usr/share/spa-0.2
+  # NOTE(charles): Required to avoid,
+  # Oct 16 06:55:01 gondor pipewire[31569]: pw.conf: execvp error '/usr/bin/wireplumber': No such file or directory
+  # Might be better to adjust the configuration.
+  # See also patch file for pipewire to exec this... Not documented.
   /usr/bin/wireplumber:
     symlink: $SNAP/usr/bin/wireplumber
   /usr/share/alsa:
@@ -29,24 +35,23 @@ layout:
     bind: $SNAP/etc/alsa
   /etc/pulse:
     bind: $SNAP/etc/pulse
+  /etc/pipewire:
+    bind: $SNAP/etc/pipewire
 
 environment:
   SPA_PLUGIN_DIR: $SNAP/usr/lib/$CRAFT_ARCH_TRIPLET_BUILD_FOR/spa-0.2
   LD_LIBRARY_PATH: ${LD_LIBRARY_PATH:+$LD_LIBRARY_PATH:}/usr/lib:/usr/lib/$CRAFT_ARCH_TRIPLET_BUILD_FOR:$SNAP/usr/lib:$SNAP/usr/lib/$CRAFT_ARCH_TRIPLET_BUILD_FOR:$SNAP/usr/lib/$CRAFT_ARCH_TRIPLET_BUILD_FOR/pipewire-0.3:$SNAP/usr/lib/$CRAFT_ARCH_TRIPLET_BUILD_FOR/pulseaudio
 
+assumes:
+  - snapd2.71 # for pipewire interface
+
 apps:
   pipewire-bin:
     command: usr/bin/pipewire
+    command-chain:
+      - scripts/set-real-runtime-dir.sh
     daemon: simple
-    # it's socket-activated, so if it dies/is killed, don't relaunch it
     restart-condition: never
-    sockets:
-      pipewire-socket:
-        listen-stream: $XDG_RUNTIME_DIR/pipewire-0
-        socket-mode: 0644
-      pipewire-manager-socket:
-        listen-stream: $XDG_RUNTIME_DIR/pipewire-0-manager
-        socket-mode: 0644
     daemon-scope: user
     slots: &pwslots
       - pipewire
@@ -81,19 +86,8 @@ apps:
       - modem-manager
   pipewire-pulse:
     command: usr/bin/pipewire-pulse
-    daemon: simple
-    restart-condition: never
-    passthrough:
-      daemon-scope: user
-    sockets:
-      pulse-socket:
-        listen-stream: $XDG_RUNTIME_DIR/pulse/native
-        socket-mode: 0644
-    slots: *pwslots
-    plugs: *pwplugs
-
-  init-pipewire:
-    command: scripts/init-pipewire.sh
+    command-chain:
+      - scripts/set-real-runtime-dir.sh
     daemon: simple
     restart-condition: never
     daemon-scope: user
@@ -181,25 +175,83 @@ slots:
     bus: session
     name: org.freedesktop.ReserveDevice1.Audio9
 
-
 parts:
+  libcamera:
+    plugin: meson
+    source: https://git.libcamera.org/libcamera/libcamera.git
+    source-type: git
+    source-depth: 1
+    source-tag: v0.7.0
+    meson-parameters:
+      - --prefix=/usr
+      - -Dbuildtype=release
+      - -Ddocumentation=disabled
+      - -Dcam=disabled
+      - -Dgstreamer=enabled
+      - -Dlibunwind=enabled
+      - -Dpycamera=disabled
+      - -Dtracing=disabled
+      - -Dlc-compliance=disabled
+      - -Dtest=false
+      - -Dv4l2=enabled
+    build-packages:
+      - libevent-dev
+      - libgnutls28-dev
+      - libgstreamer-plugins-base1.0-dev
+      - libgstreamer1.0-dev
+      # TODO: How to handle these architectures?
+      #- libpisp-dev [arm64 armel armhf]
+      - libtiff-dev
+      - libudev-dev
+      - libyaml-dev
+      - libyuv-dev
+      - openssl
+      - pkgconf
+      - python3-jinja2
+      - python3-ply
+      - python3-yaml
+    stage-packages:
+      - libudev1
+      - libyaml-0-2
+      - libyuv0
+
   pipewire:
+    after: [libcamera]
     plugin: meson
     source: https://gitlab.freedesktop.org/pipewire/pipewire.git
     source-depth: 1
-    source-tag: "1.4.8"
+    source-tag: "1.6.2"
     source-type: git
     meson-parameters:
       - --prefix=/usr
-      - -Doptimization=3
-      - -Ddebug=true
-      - -Dexamples=disabled
-      - -Dman=disabled
-      - -Dtests=disabled
-      - -Dsystemd=enabled
+      - -Daudiotestsrc=enabled
+      - -Davahi=enabled
+      - -Dbuildtype=release
+      # TODO: Separate into a debugging snap? Useful while development is active
+      #- -Ddebug=true
+      - -Dbluez5-backend-native-mm=enabled
+      - -Dbluez5-codec-aac=enabled
+      - -Dbluez5-codec-aptx=enabled
+      - -Dbluez5-codec-lc3=enabled
+      # TODO: Package https://github.com/arkq/LC3plus/blob/master/src/floating_point/lc3plus.h ?
+      - -Dbluez5-codec-lc3plus=disabled
+      - -Dbluez5-codec-ldac=enabled
+      - -Dbluez5-codec-opus=enabled
+      # Force the wrap file to kick in. Notice we do *not* depend on the
+      # Ubuntu libcamera packages, because libcamera is not a stable
+      # interface, and thus perpetually out-of-date.
+      - -Dlibcamera=enabled
+      - -Dlibffado=enabled
+      # TODO: Need a libroc newer than that which is offered in core24
+      - -Droc=disabled
       - -Dsnap=enabled
       - -Dsystemd-user-service=enabled
       - -Dsystemd-system-service=enabled
+      - -Dexamples=disabled
+      - -Dman=disabled
+      - -Dtests=disabled
+      - -Dffmpeg=enabled
+      - -Dvulkan=enabled
     override-pull: |
       craftctl default
       git_ver="$(git describe --tags)"
@@ -213,8 +265,13 @@ parts:
       - libapparmor-dev
       - libasound2-dev
       - libavahi-client-dev
+      - libavcodec-dev
+      - libavfilter-dev
+      - libfdk-aac-dev
+      - libvulkan-dev
+      # TODO: Need to package libroc, core24 is too old
+      #- libroc-dev
       - libbluetooth-dev
-      - libcamera-dev
       - libdbus-1-dev
       - libffado-dev
       - libfreeaptx-dev
@@ -250,13 +307,21 @@ parts:
       - python3-docutils
       - systemd-dev
     stage-packages:
+      - libavcodec60
+      - libavcodec-extra
+      - libavfilter-extra
+      - libavfilter-extra9
+      - libavfilter9
+      - libfdk-aac2
+      # TODO: Need to package libroc, core24 is too old
+      #- libroc0.3
       - libxfixes3
       - libcanberra0t64
-      - libroc0.3
       - libvorbisfile3
       - libpulse0
       - libffado2
       - liblilv-0-0
+      - libvulkan1
       - libavahi-client3
       - libopusenc0
       - libopus0
@@ -271,7 +336,6 @@ parts:
       - libasound2t64
       - libgstreamer-plugins-base1.0-0
       - libmysofa1
-      - libcamera0.2
       - libldacbt-enc2
       - libsbc1
       - liblc3-1
