@@ -74,6 +74,7 @@ apps:
       - mpris
     plugs: &pwplugs
       - desktop
+      - xdg-portal-permission-store
       - x11
       - alsa
       - bluez
